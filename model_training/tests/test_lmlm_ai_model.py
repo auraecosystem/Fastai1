@@ -51,13 +51,13 @@ def theory_of_mind_model():
 
 
 def general_ai_model(prompt):
-    """Generate text with GPT-2; model weights are fetched only when called."""
+    """Generate up to 100 new GPT-2 tokens; weights load only when called."""
     from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
     model = GPT2LMHeadModel.from_pretrained("gpt2")
     inputs = tokenizer.encode(prompt, return_tensors="pt")
-    outputs = model.generate(inputs, max_length=100, num_return_sequences=1)
+    outputs = model.generate(inputs, max_new_tokens=100, num_return_sequences=1)
     return tokenizer.decode(outputs[0], skip_special_tokens=True)
 
 
