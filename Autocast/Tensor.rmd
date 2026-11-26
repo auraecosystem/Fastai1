@@ -1,0 +1,15 @@
+# Creates model and optimizer in default precision
+model = Net()
+optimizer = optim.SGD(model.parameters(), ...)
+
+for epoch in epochs:
+    for input, target in data:
+        optimizer.zero_grad()
+
+        # Runs the forward pass with autocasting.
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            output = model(input)
+            loss = loss_fn(output, target)
+
+        loss.backward()
+        optimizer.step()
