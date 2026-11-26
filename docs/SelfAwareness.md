@@ -1,12 +1,12 @@
 # PyTorch self-awareness / runtime introspection
 
-Fastai1 provides `model_training.self_awareness` as a lightweight, evidence-based
-observer for a supplied `torch.nn.Module`. It reports public model metadata,
-parameter and gradient health, tensor numerical health, and training events that
-the caller explicitly records.
+Fastai1 provides `model_training.self_awareness` as a lightweight observer for
+measurable state from a supplied `torch.nn.Module`. It reports architecture and
+parameter metadata, gradient health, tensor numerical health, and training
+events explicitly recorded by the caller.
 
-This is operational introspection, not a claim of consciousness, subjective
-experience, autonomous self-knowledge, or unrestricted access to model internals.
+This is operational introspection, not consciousness, subjective experience,
+autonomous self-knowledge, or unrestricted access to model internals.
 
 ## Quick start
 
@@ -19,34 +19,31 @@ observer = SelfAwareness(model, history_size=50)
 
 for epoch in range(3):
     observer.start_epoch()
-    # Run the normal training loop.
-    loss = torch.tensor(0.42)  # Replace with the actual detached loss.
-    observer.record_step(loss, batch_size=32)
+    # In the real loop, pass the detached loss after the optimizer step.
+    observer.record_step(torch.tensor(0.42), batch_size=32)
 
 report = observer.inspect()
-print(report)
 ```
 
 ## API
 
 - `ModelIntrospector.inspect(model)`: parameter counts, module types, mode,
-  devices, dtypes, buffers, and gradient health.
+  devices, dtypes, buffers, and dense/sparse gradient health.
 - `ModelIntrospector.inspect_tensor(tensor)`: shape, dtype, device, finite
-  fraction, and descriptive statistics. Statistics are computed from detached
-  values and do not retain the computation graph.
+  fraction, and descriptive statistics. It uses a detached CPU diagnostic copy,
+  avoiding unsupported float64 operations on MPS.
 - `TrainingAwareness`: tracks epoch, steps, samples, recent finite losses,
   best loss, non-finite loss count, elapsed time, and caller-supplied metrics.
 - `SelfAwareness`: combines model inspection with explicit training observations.
 
-Call `record_step` after a completed optimizer step. Pass detached loss values
-when possible. The observer does not install hooks, modify model state, retain
-batches, or change gradients.
+Call `record_step` after a completed optimizer step. The observer installs no
+hooks, modifies no model state, retains no batches, and does not change gradients.
+Non-finite losses/metrics are represented as JSON null with a separate finite
+flag/counter, so reports can be serialized with strict JSON settings.
 
 ## Interpretation and limits
 
-The report separates observable runtime facts from estimates. Parameter count
-does not establish capability; task-specific benchmarks are required. A raw
-softmax score is not automatically calibrated confidence, so this module does
-not infer confidence or claim that the model knows its own limitations. External
-hardware availability and operating-system metrics are outside this module's
-scope.
+Parameter count does not establish capability; task-specific benchmarks are
+required. A raw softmax score is not automatically calibrated confidence. This
+module does not infer confidence or claim that a model knows its own limitations.
+External hardware availability and operating-system metrics are outside scope.
