@@ -1,9 +1,6 @@
-"""CPU-safe regression tests for CUDA AMP compatibility helpers."""
-from collections import defaultdict, namedtuple
-
+from collections import namedtuple
 import pytest
 import torch
-
 from model_training.lmlm_training.amp import _cast, autocast, custom_bwd, custom_fwd
 
 

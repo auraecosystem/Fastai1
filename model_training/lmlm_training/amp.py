@@ -1,133 +1,186 @@
-"""CUDA automatic mixed precision helpers for custom autograd functions.
+"""Device-aware automatic mixed precision helpers.
 
-Preserves historical torch.cuda.amp behavior while using device-aware autocast
-queries where available. This module deliberately targets CUDA only.
+The API mirrors the useful subset of torch.cuda.amp while supporting CPU/CUDA
+autocast through PyTorch's public torch.autocast API. CUDA is not required at
+import time.
 """
 from __future__ import annotations
 
 import collections.abc
 import functools
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
 try:
     import numpy as np
-except ModuleNotFoundError:
+except ImportError:
     np = None  # type: ignore[assignment]
 
 __all__ = ["autocast", "custom_fwd", "custom_bwd"]
 
 
-class autocast(torch.autocast):
-    """CUDA autocast context manager and decorator."""
-
-    def __init__(self, enabled: bool = True, dtype: torch.dtype = torch.float16,
-                 cache_enabled: bool = True) -> None:
-        super().__init__("cuda", enabled=enabled, dtype=dtype,
-                         cache_enabled=cache_enabled)
-
-
-def _is_autocast_enabled() -> bool:
-    """Read CUDA autocast state across PyTorch API generations."""
+def _autocast_enabled(device_type: str) -> bool:
+    """Read autocast state across PyTorch versions."""
     try:
-        return bool(torch.is_autocast_enabled("cuda"))
+        return bool(torch.is_autocast_enabled(device_type))
     except TypeError:
-        return bool(torch.is_autocast_enabled())
+        if device_type == "cuda":
+            return bool(torch.is_autocast_enabled())
+        getter = getattr(torch, "is_autocast_cpu_enabled", None)
+        return bool(getter()) if device_type == "cpu" and getter else False
 
 
-def _get_autocast_dtype() -> torch.dtype:
-    """Read the active CUDA autocast dtype with a legacy fallback."""
+def _autocast_dtype(device_type: str) -> torch.dtype:
+    """Read the active autocast dtype with compatibility fallbacks."""
     getter = getattr(torch, "get_autocast_dtype", None)
     if getter is not None:
         try:
-            return getter("cuda")
+            return getter(device_type)
         except (TypeError, RuntimeError):
             pass
-    legacy_getter = getattr(torch, "get_autocast_gpu_dtype", None)
-    return legacy_getter() if legacy_getter is not None else torch.float16
+    if device_type == "cuda":
+        legacy = getattr(torch, "get_autocast_gpu_dtype", None)
+        return legacy() if legacy is not None else torch.float16
+    if device_type == "cpu":
+        legacy = getattr(torch, "get_autocast_cpu_dtype", None)
+        return legacy() if legacy is not None else torch.bfloat16
+    raise ValueError(f"autocast dtype lookup is unsupported for {device_type!r}")
 
 
-def _rebuild_mapping(value, items):
-    if isinstance(value, collections.defaultdict):
-        return type(value)(value.default_factory, items)
-    try:
-        return type(value)(items)
-    except (TypeError, ValueError):
-        return dict(items)
+class autocast:
+    """Context manager/decorator for autocast on a selected device.
+
+    The default remains CUDA FP16 for compatibility. Specify device_type and
+    dtype explicitly for CPU or other supported PyTorch devices.
+    """
+
+    def __init__(
+        self,
+        enabled: bool = True,
+        dtype: torch.dtype | None = None,
+        cache_enabled: bool = True,
+        *,
+        device_type: str = "cuda",
+    ) -> None:
+        self.device_type = device_type
+        self.enabled = bool(enabled)
+        self.dtype = dtype or (
+            torch.float16 if device_type == "cuda" else torch.bfloat16
+        )
+        self.cache_enabled = cache_enabled
+        self._context = None
+
+    def __enter__(self):
+        self._context = torch.autocast(
+            device_type=self.device_type,
+            enabled=self.enabled,
+            dtype=self.dtype,
+            cache_enabled=self.cache_enabled,
+        )
+        return self._context.__enter__()
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any):
+        if self._context is None:
+            raise RuntimeError("autocast context was not entered")
+        try:
+            return self._context.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._context = None
+
+    def __call__(self, func: Callable):
+        @functools.wraps(func)
+        def decorate(*args, **kwargs):
+            with type(self)(
+                enabled=self.enabled,
+                dtype=self.dtype,
+                cache_enabled=self.cache_enabled,
+                device_type=self.device_type,
+            ):
+                return func(*args, **kwargs)
+        return decorate
 
 
-def _cast(value: Any, dtype: torch.dtype) -> Any:
-    """Recursively cast eligible CUDA floating tensors; preserve common containers."""
+def _cast(value: Any, dtype: torch.dtype, *, device_type: str = "cuda") -> Any:
+    """Cast eligible floating tensors in common nested Python containers."""
     if isinstance(value, torch.Tensor):
-        eligible = (value.is_floating_point() and value.is_cuda
-                    and value.dtype != torch.float64)
+        eligible = (
+            value.device.type == device_type
+            and value.is_floating_point()
+            and value.dtype != torch.float64
+        )
         return value.to(dtype=dtype) if eligible else value
-    if isinstance(value, (str, bytes, bytearray, memoryview)):
+    if isinstance(value, (str, bytes, bytearray)):
         return value
     if np is not None and isinstance(value, np.ndarray):
         return value
     if isinstance(value, collections.abc.Mapping):
-        items = [(_cast(k, dtype), _cast(v, dtype)) for k, v in value.items()]
-        return _rebuild_mapping(value, items)
-    if isinstance(value, list):
-        converted = [_cast(item, dtype) for item in value]
+        items = [
+            (_cast(k, dtype, device_type=device_type),
+             _cast(v, dtype, device_type=device_type))
+            for k, v in value.items()
+        ]
         try:
-            return type(value)(converted)
-        except TypeError:
-            return converted
+            return type(value)(items)
+        except (TypeError, ValueError):
+            return dict(items)
+    if isinstance(value, tuple) and hasattr(value, "_fields"):
+        return type(value)(
+            *(_cast(v, dtype, device_type=device_type) for v in value)
+        )
     if isinstance(value, tuple):
-        converted = tuple(_cast(item, dtype) for item in value)
-        if hasattr(value, "_fields"):
-            return type(value)(*converted)
-        try:
-            return type(value)(converted)
-        except TypeError:
-            return converted
+        return tuple(_cast(v, dtype, device_type=device_type) for v in value)
+    if isinstance(value, list):
+        return [_cast(v, dtype, device_type=device_type) for v in value]
     if isinstance(value, set):
-        return type(value)(_cast(item, dtype) for item in value)
+        return {_cast(v, dtype, device_type=device_type) for v in value}
     if isinstance(value, frozenset):
-        return type(value)(_cast(item, dtype) for item in value)
-    if isinstance(value, collections.abc.Iterable):
-        return (_cast(item, dtype) for item in value)
+        return frozenset(_cast(v, dtype, device_type=device_type) for v in value)
+    if isinstance(value, collections.abc.Iterator):
+        return (_cast(v, dtype, device_type=device_type) for v in value)
     return value
 
 
-def custom_fwd(fwd=None, *, cast_inputs: torch.dtype | None = None):
+def custom_fwd(
+    fwd=None, *, cast_inputs: torch.dtype | None = None, device_type: str = "cuda"
+):
     """Decorate a custom autograd forward method.
 
-    When cast_inputs is set and CUDA autocast is active, eligible floating CUDA
-    tensors are cast and the forward body runs with autocast disabled. Outside
-    autocast, casting is a no-op.
+    If cast_inputs is set, eligible inputs are cast only while autocast is
+    active; the wrapped forward then executes with autocast disabled.
     """
     if fwd is None:
-        return functools.partial(custom_fwd, cast_inputs=cast_inputs)
+        return functools.partial(
+            custom_fwd, cast_inputs=cast_inputs, device_type=device_type
+        )
 
     @functools.wraps(fwd)
-    def decorate_fwd(*args, **kwargs):
-        if not args:
-            raise TypeError("custom_fwd must decorate an autograd forward method")
-        ctx = args[0]
-        enabled = _is_autocast_enabled()
-        ctx._dtype = _get_autocast_dtype()
-        ctx._fwd_used_autocast = enabled
-        if cast_inputs is None or not enabled:
-            return fwd(*args, **kwargs)
-        ctx._fwd_used_autocast = False
-        with autocast(enabled=False):
-            return fwd(*_cast(args, cast_inputs), **_cast(kwargs, cast_inputs))
+    def decorate_fwd(ctx, *args, **kwargs):
+        active = _autocast_enabled(device_type)
+        ctx._lmlm_amp_device_type = device_type
+        ctx._lmlm_amp_dtype = _autocast_dtype(device_type)
+        ctx._lmlm_amp_enabled = active
+        if cast_inputs is not None and active:
+            with autocast(
+                enabled=False, device_type=device_type, dtype=ctx._lmlm_amp_dtype
+            ):
+                cast_args = _cast(args, cast_inputs, device_type=device_type)
+                cast_kwargs = _cast(kwargs, cast_inputs, device_type=device_type)
+                return fwd(ctx, *cast_args, **cast_kwargs)
+        return fwd(ctx, *args, **kwargs)
+
     return decorate_fwd
 
 
 def custom_bwd(bwd):
-    """Restore the CUDA autocast state captured by the custom forward method."""
+    """Run custom autograd backward under the forward autocast state."""
     @functools.wraps(bwd)
-    def decorate_bwd(*args, **kwargs):
-        if not args:
-            raise TypeError("custom_bwd must decorate an autograd backward method")
-        ctx = args[0]
-        enabled = bool(getattr(ctx, "_fwd_used_autocast", False))
-        dtype = getattr(ctx, "_dtype", torch.float16)
-        with autocast(enabled=enabled, dtype=dtype):
-            return bwd(*args, **kwargs)
+    def decorate_bwd(ctx, *args, **kwargs):
+        device_type = getattr(ctx, "_lmlm_amp_device_type", "cuda")
+        dtype = getattr(ctx, "_lmlm_amp_dtype", torch.float16)
+        enabled = getattr(ctx, "_lmlm_amp_enabled", False)
+        with autocast(
+            enabled=enabled, dtype=dtype, device_type=device_type
+        ):
+            return bwd(ctx, *args, **kwargs)
     return decorate_bwd
