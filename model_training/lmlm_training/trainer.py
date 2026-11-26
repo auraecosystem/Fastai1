@@ -129,8 +129,6 @@ def train(model: nn.Module, train_loader: Iterable, optimizer: torch.optim.Optim
                 else:
                     optimizer.step()
                     did_update = True
-                optimizer.zero_grad(set_to_none=True)
-                pending_samples, pending_batches = 0, 0
                 if did_update:
                     global_step += 1
                     epoch_steps += 1
@@ -138,6 +136,13 @@ def train(model: nn.Module, train_loader: Iterable, optimizer: torch.optim.Optim
                         scheduler.step()
                     if on_step is not None:
                         on_step(global_step, float(loss.detach()))
+                    if self_awareness is not None:
+                        self_awareness.record_step(
+                            pending_loss_sum / pending_samples,
+                            batch_size=pending_samples,
+                        )
+                optimizer.zero_grad(set_to_none=True)
+                pending_samples, pending_batches, pending_loss_sum = 0, 0, 0.0
         if pending_batches:
             if scaler:
                 scaler.unscale_(optimizer)
