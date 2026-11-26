@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aura-fastai1"
+version = "0.2.0"
+description = "Experimental fastai-v1-inspired utilities and native LMLM PyTorch training adapter"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "License not yet specified" }
+authors = [{ name = "Seriki walter Yakub" }]
+dependencies = ["numpy>=1.23"]
+
+[project.optional-dependencies]
+training = ["torch>=2.1"]
+dev = ["pytest>=7", "build>=1", "ruff>=0.4"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["model_training*"]
+
+[tool.pytest.ini_options]
+testpaths = ["model_training/tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
