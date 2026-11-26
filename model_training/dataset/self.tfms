@@ -1,0 +1,14 @@
+def mult(x): return x*2
+mult.order = 2
+
+fns = ['dog_0.jpg','cat_0.jpg','cat_2.jpg','cat_1.jpg','dog_1.jpg']
+tl = TfmdLists(fns, [_lbl,_Cat(),mult])
+
+test_eq(tl.infer_idx('dog_45.jpg'), 0)
+test_eq(tl.infer('dog_45.jpg'), 2)
+
+test_eq(tl.infer_idx(4), 2)
+test_eq(tl.infer(4), 8)
+
+with expect_fail(): tl.infer_idx(2.0)
+with expect_fail(): tl.infer(2.0)
