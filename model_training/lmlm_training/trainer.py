@@ -79,15 +79,25 @@ def train(model: nn.Module, train_loader: Iterable, optimizer: torch.optim.Optim
           validation_loader: Iterable | None = None, scheduler=None,
           checkpoint_manager=None, checkpoint_name: str = "last.pt",
           start_epoch: int = 0, global_step: int = 0,
-          on_step: Callable[[int, float], Any] | None = None) -> TrainResult:
+          on_step: Callable[[int, float], Any] | None = None,
+          self_awareness: Any | None = None) -> TrainResult:
+    if self_awareness is not None and not all(
+        callable(getattr(self_awareness, name, None))
+        for name in ("start_epoch", "record_step")
+    ):
+        raise TypeError("self_awareness must provide start_epoch() and record_step()")
+
     plan = resolve_device_plan(config.device, config.precision)
     model.to(plan.device)
     scaler = plan.make_grad_scaler()
     history = []
     for epoch in range(start_epoch, start_epoch + config.epochs):
         model.train()
+        if self_awareness is not None:
+            self_awareness.start_epoch(epoch + 1)
         optimizer.zero_grad(set_to_none=True)
         epoch_loss, samples, pending_samples, pending_batches = 0.0, 0, 0, 0
+        pending_loss_sum = 0.0
         epoch_steps = 0
         for batch in train_loader:
             x, y = _unpack(batch, plan.device)
@@ -101,6 +111,7 @@ def train(model: nn.Module, train_loader: Iterable, optimizer: torch.optim.Optim
             samples += size
             pending_samples += size
             pending_batches += 1
+            pending_loss_sum += float(loss.detach()) * size
             if pending_batches >= config.accumulation_steps:
                 if scaler:
                     scaler.unscale_(optimizer)
@@ -150,6 +161,12 @@ def train(model: nn.Module, train_loader: Iterable, optimizer: torch.optim.Optim
                 epoch_steps += 1
                 if scheduler is not None:
                     scheduler.step()
+                if self_awareness is not None:
+                    self_awareness.record_step(
+                        pending_loss_sum / pending_samples,
+                        batch_size=pending_samples,
+                    )
+            optimizer.zero_grad(set_to_none=True)
         row = {"epoch": float(epoch + 1), "train_loss": epoch_loss / samples if samples else math.nan,
                "optimizer_steps": float(epoch_steps)}
         if validation_loader is not None:
