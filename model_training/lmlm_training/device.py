@@ -17,8 +17,9 @@ class DevicePlan:
     def autocast(self):
         if not self.amp_enabled or self.precision == "fp32":
             return nullcontext()
+        from .amp import autocast
         dtype = torch.float16 if self.precision == "fp16" else torch.bfloat16
-        return torch.autocast(device_type=self.device.type, dtype=dtype)
+        return autocast(device_type=self.device.type, dtype=dtype)
 
     def make_grad_scaler(self):
         if self.device.type != "cuda" or self.precision != "fp16" or not self.amp_enabled:
