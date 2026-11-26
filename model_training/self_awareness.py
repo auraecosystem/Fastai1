@@ -1,10 +1,11 @@
 """PyTorch-backed, evidence-based introspection for LMLM training.
 
-This module reports observable model/runtime/training state. It does not claim
-consciousness, subjective experience, or access to hidden internal thoughts.
+Reports observable model/runtime/training state. This is operational
+introspection, not a claim of consciousness or subjective experience.
 """
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from time import monotonic
@@ -14,12 +15,8 @@ import torch
 from torch import nn
 
 __all__ = [
-    "TensorHealth",
-    "ModelSnapshot",
-    "TrainingSnapshot",
-    "ModelIntrospector",
-    "TrainingAwareness",
-    "SelfAwareness",
+    "TensorHealth", "ModelSnapshot", "TrainingSnapshot",
+    "ModelIntrospector", "TrainingAwareness", "SelfAwareness",
 ]
 
 
@@ -31,10 +28,17 @@ def _number(value: Any) -> float:
     return float(value)
 
 
+def _gradient_values(gradient: torch.Tensor) -> torch.Tensor:
+    """Return stored values for dense or sparse gradients."""
+    if gradient.layout == torch.sparse_coo:
+        return gradient.detach().coalesce().values()
+    if gradient.layout != torch.strided:
+        return gradient.detach().values()
+    return gradient.detach()
+
+
 @dataclass(frozen=True)
 class TensorHealth:
-    """Numerical health summary for a tensor, without retaining the tensor."""
-
     shape: tuple[int, ...]
     dtype: str
     device: str
@@ -49,8 +53,6 @@ class TensorHealth:
 
 @dataclass(frozen=True)
 class ModelSnapshot:
-    """Observable architecture, parameter, mode, and device information."""
-
     class_name: str
     training: bool
     total_parameters: int
@@ -68,8 +70,6 @@ class ModelSnapshot:
 
 @dataclass(frozen=True)
 class TrainingSnapshot:
-    """Training counters and recent measured loss behavior."""
-
     epoch: int
     global_step: int
     samples_seen: int
@@ -79,17 +79,16 @@ class TrainingSnapshot:
     loss_is_finite: bool | None
     non_finite_loss_count: int
     elapsed_seconds: float
-    latest_metrics: dict[str, float] = field(default_factory=dict)
+    latest_metrics: dict[str, float | None] = field(default_factory=dict)
 
 
 class ModelIntrospector:
-    """Inspect public PyTorch module state and tensor health."""
+    """Inspect public PyTorch module state and tensor numerical health."""
 
     @staticmethod
     def inspect(model: nn.Module) -> ModelSnapshot:
         if not isinstance(model, nn.Module):
             raise TypeError("model must be a torch.nn.Module")
-
         parameters = list(model.parameters())
         buffers = list(model.buffers())
         module_types: dict[str, int] = {}
@@ -97,75 +96,65 @@ class ModelIntrospector:
             name = type(module).__name__
             module_types[name] = module_types.get(name, 0) + 1
 
-        devices = sorted({str(t.device) for t in (*parameters, *buffers)})
-        dtypes = sorted({str(t.dtype) for t in (*parameters, *buffers)})
         gradients = [p.grad for p in parameters if p.grad is not None]
+        non_finite = 0
+        for gradient in gradients:
+            values = _gradient_values(gradient)
+            if values.numel() and not bool(torch.isfinite(values).all().item()):
+                non_finite += 1
 
+        tensors = (*parameters, *buffers)
         return ModelSnapshot(
             class_name=f"{type(model).__module__}.{type(model).__qualname__}",
             training=model.training,
             total_parameters=sum(p.numel() for p in parameters),
-            trainable_parameters=sum(
-                p.numel() for p in parameters if p.requires_grad
-            ),
-            frozen_parameters=sum(
-                p.numel() for p in parameters if not p.requires_grad
-            ),
-            parameter_bytes=sum(
-                p.numel() * p.element_size() for p in parameters
-            ),
+            trainable_parameters=sum(p.numel() for p in parameters if p.requires_grad),
+            frozen_parameters=sum(p.numel() for p in parameters if not p.requires_grad),
+            parameter_bytes=sum(p.numel() * p.element_size() for p in parameters),
             buffers=sum(t.numel() for t in buffers),
             module_count=sum(module_types.values()),
             module_types=module_types,
-            devices=tuple(devices),
-            dtypes=tuple(dtypes),
+            devices=tuple(sorted({str(t.device) for t in tensors})),
+            dtypes=tuple(sorted({str(t.dtype) for t in tensors})),
             gradients_present=len(gradients),
-            gradients_non_finite=sum(
-                int(not bool(torch.isfinite(g).all().item())) for g in gradients
-            ),
+            gradients_non_finite=non_finite,
         )
 
     @staticmethod
     def inspect_tensor(tensor: torch.Tensor) -> TensorHealth:
         if not isinstance(tensor, torch.Tensor):
             raise TypeError("tensor must be a torch.Tensor")
-
         detached = tensor.detach()
-        if detached.is_complex():
-            values = detached.abs().to(dtype=torch.float64)
-        elif detached.is_floating_point():
-            values = detached.to(dtype=torch.float64)
-        else:
-            values = detached.to(dtype=torch.float64)
+        if detached.layout != torch.strided:
+            detached = detached.to_dense()
+
+        # MPS does not implement float64. Move only the detached diagnostic
+        # copy to CPU before computing stable float64 summary statistics.
+        values = detached.cpu()
+        values = values.abs() if values.is_complex() else values
+        values = values.to(dtype=torch.float64)
 
         if values.numel() == 0:
-            finite_fraction = 1.0
-            finite = True
+            finite, fraction = True, 1.0
             mean = std = minimum = maximum = None
         else:
             mask = torch.isfinite(values)
-            finite_fraction = float(mask.float().mean().cpu().item())
-            finite = bool(mask.all().cpu().item())
+            finite = bool(mask.all().item())
+            fraction = float(mask.float().mean().item())
             safe = values[mask]
             if safe.numel():
-                mean = float(safe.mean().cpu().item())
-                std = float(safe.std(unbiased=False).cpu().item())
-                minimum = float(safe.min().cpu().item())
-                maximum = float(safe.max().cpu().item())
+                mean = float(safe.mean().item())
+                std = float(safe.std(unbiased=False).item())
+                minimum = float(safe.min().item())
+                maximum = float(safe.max().item())
             else:
                 mean = std = minimum = maximum = None
 
         return TensorHealth(
-            shape=tuple(detached.shape),
-            dtype=str(detached.dtype),
-            device=str(detached.device),
-            numel=detached.numel(),
-            finite=finite,
-            finite_fraction=finite_fraction,
-            mean=mean,
-            std=std,
-            min=minimum,
-            max=maximum,
+            shape=tuple(detached.shape), dtype=str(tensor.dtype),
+            device=str(tensor.device), numel=tensor.numel(),
+            finite=finite, finite_fraction=fraction,
+            mean=mean, std=std, min=minimum, max=maximum,
         )
 
 
@@ -175,14 +164,12 @@ class TrainingAwareness:
     def __init__(self, history_size: int = 100) -> None:
         if history_size < 1:
             raise ValueError("history_size must be at least 1")
-        self.epoch = 0
-        self.global_step = 0
-        self.samples_seen = 0
+        self.epoch = self.global_step = self.samples_seen = 0
         self.latest_loss: float | None = None
         self.best_loss: float | None = None
         self.loss_is_finite: bool | None = None
         self.non_finite_loss_count = 0
-        self.latest_metrics: dict[str, float] = {}
+        self.latest_metrics: dict[str, float | None] = {}
         self._losses: deque[float] = deque(maxlen=history_size)
         self._started = monotonic()
 
@@ -204,29 +191,31 @@ class TrainingAwareness:
         value = _number(loss)
         self.global_step += 1
         self.samples_seen += int(batch_size)
-        self.latest_loss = value
-        self.loss_is_finite = bool(torch.isfinite(torch.tensor(value)).item())
+        self.loss_is_finite = math.isfinite(value)
+        # Keep reports strict-JSON-safe: non-finite measurements are represented
+        # by null, while the finite flag and counter preserve diagnostic meaning.
+        self.latest_loss = value if self.loss_is_finite else None
         if self.loss_is_finite:
             self._losses.append(value)
             self.best_loss = value if self.best_loss is None else min(self.best_loss, value)
         else:
             self.non_finite_loss_count += 1
 
-        if metrics:
-            self.latest_metrics = {str(k): _number(v) for k, v in metrics.items()}
+        if metrics is not None:
+            self.latest_metrics = {}
+            for key, metric in metrics.items():
+                metric_value = _number(metric)
+                self.latest_metrics[str(key)] = (
+                    metric_value if math.isfinite(metric_value) else None
+                )
         return self.snapshot()
 
     def snapshot(self) -> TrainingSnapshot:
-        recent_mean = (
-            sum(self._losses) / len(self._losses) if self._losses else None
-        )
+        recent_mean = sum(self._losses) / len(self._losses) if self._losses else None
         return TrainingSnapshot(
-            epoch=self.epoch,
-            global_step=self.global_step,
-            samples_seen=self.samples_seen,
-            latest_loss=self.latest_loss,
-            mean_recent_loss=recent_mean,
-            best_loss=self.best_loss,
+            epoch=self.epoch, global_step=self.global_step,
+            samples_seen=self.samples_seen, latest_loss=self.latest_loss,
+            mean_recent_loss=recent_mean, best_loss=self.best_loss,
             loss_is_finite=self.loss_is_finite,
             non_finite_loss_count=self.non_finite_loss_count,
             elapsed_seconds=max(0.0, monotonic() - self._started),
@@ -235,10 +224,10 @@ class TrainingAwareness:
 
 
 class SelfAwareness:
-    """Combine model introspection with explicitly recorded training evidence.
+    """Combine model inspection with explicitly recorded training evidence.
 
-    The object does not hook into forward passes or alter gradients. Call
-    record_step() from the trainer when a step has completed.
+    No forward hooks are installed and no gradients are modified. The trainer
+    must call record_step() after a completed step.
     """
 
     def __init__(self, model: nn.Module, *, history_size: int = 100) -> None:
@@ -249,13 +238,10 @@ class SelfAwareness:
         self.training = TrainingAwareness(history_size=history_size)
 
     def inspect(self) -> dict[str, Any]:
-        """Return a JSON-friendly snapshot of known model and training state."""
-        model_snapshot = self.introspector.inspect(self.model)
-        training_snapshot = self.training.snapshot()
         return {
             "scope": "observable_runtime_state",
-            "model": asdict(model_snapshot),
-            "training": asdict(training_snapshot),
+            "model": asdict(self.introspector.inspect(self.model)),
+            "training": asdict(self.training.snapshot()),
             "limitations": [
                 "Reports measured state; it does not establish consciousness.",
                 "Capabilities require task-specific evaluation evidence.",
@@ -267,15 +253,10 @@ class SelfAwareness:
         self.training.start_epoch(epoch)
 
     def record_step(
-        self,
-        loss: float | torch.Tensor,
-        *,
-        batch_size: int = 0,
+        self, loss: float | torch.Tensor, *, batch_size: int = 0,
         metrics: Mapping[str, float | torch.Tensor] | None = None,
     ) -> TrainingSnapshot:
-        return self.training.record_step(
-            loss, batch_size=batch_size, metrics=metrics
-        )
+        return self.training.record_step(loss, batch_size=batch_size, metrics=metrics)
 
     def inspect_tensor(self, tensor: torch.Tensor) -> TensorHealth:
         return self.introspector.inspect_tensor(tensor)
