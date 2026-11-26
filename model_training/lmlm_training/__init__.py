@@ -1,14 +1,16 @@
 """Native PyTorch training utilities for LMLM model implementations."""
 from .amp import autocast, custom_bwd, custom_fwd
-from .device import DevicePlan, resolve_device_plan
-from .checkpoint import CheckpointManager, load_checkpoint
-from .trainer import TrainConfig, TrainResult, train, evaluate
 from .benchmark import BenchmarkResult, benchmark
-from .amp import autocast, custom_fwd, custom_bwd
+from .checkpoint import CheckpointManager, load_checkpoint
+from .data import DataLoaderAdapter, DataLoaders, make_dataloaders, move_to_device
+from .device import DevicePlan, resolve_device_plan
+from .trainer import TrainConfig, TrainResult, evaluate, train
 
 __all__ = [
     "autocast", "custom_fwd", "custom_bwd",
-    "DevicePlan", "resolve_device_plan", "CheckpointManager", "load_checkpoint",
+    "DevicePlan", "resolve_device_plan",
+    "CheckpointManager", "load_checkpoint",
     "TrainConfig", "TrainResult", "train", "evaluate",
-    "BenchmarkResult", "benchmark", "autocast", "custom_fwd", "custom_bwd",
+    "BenchmarkResult", "benchmark",
+    "DataLoaderAdapter", "DataLoaders", "make_dataloaders", "move_to_device",
 ]
