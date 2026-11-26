@@ -1,7 +1,11 @@
 """Conservative device and precision selection; never downloads or changes models."""
 from __future__ import annotations
+
+from contextlib import nullcontext
 from dataclasses import dataclass
+
 import torch
+
 
 @dataclass(frozen=True)
 class DevicePlan:
@@ -12,15 +16,24 @@ class DevicePlan:
 
     def autocast(self):
         if not self.amp_enabled or self.precision == "fp32":
-            from contextlib import nullcontext
             return nullcontext()
         dtype = torch.float16 if self.precision == "fp16" else torch.bfloat16
         return torch.autocast(device_type=self.device.type, dtype=dtype)
 
     def make_grad_scaler(self):
-        if self.device.type == "cuda" and self.precision == "fp16" and self.amp_enabled:
-            return torch.amp.GradScaler("cuda")
-        return None
+        if self.device.type != "cuda" or self.precision != "fp16" or not self.amp_enabled:
+            return None
+        # torch.amp.GradScaler(device, ...) is the newer API; PyTorch 2.1
+        # exposes the CUDA-specific scaler instead.
+        amp = getattr(torch, "amp", None)
+        scaler_type = getattr(amp, "GradScaler", None) if amp is not None else None
+        if scaler_type is not None:
+            try:
+                return scaler_type("cuda")
+            except TypeError:
+                pass
+        return torch.cuda.amp.GradScaler()
+
 
 def resolve_device_plan(device: str = "auto", precision: str = "auto",
                         *, allow_mps: bool = True) -> DevicePlan:
@@ -63,9 +76,7 @@ def resolve_device_plan(device: str = "auto", precision: str = "auto",
     if selected == "bf16" and resolved.type == "cuda":
         if not getattr(torch.cuda, "is_bf16_supported", lambda: False)():
             raise RuntimeError("BF16 was requested but this CUDA device does not support it")
-    if selected == "bf16" and resolved.type == "cpu":
-        if not hasattr(torch, "autocast"):
-            raise RuntimeError("CPU BF16 autocast is unavailable in this PyTorch build")
-    amp = selected != "fp32"
-    reason = f"selected {resolved.type}/{selected}"
-    return DevicePlan(resolved, selected, amp, reason)
+    if selected == "bf16" and resolved.type == "cpu" and not hasattr(torch, "autocast"):
+        raise RuntimeError("CPU BF16 autocast is unavailable in this PyTorch build")
+    return DevicePlan(resolved, selected, selected != "fp32",
+                      f"selected {resolved.type}/{selected}")
