@@ -14,14 +14,12 @@ scaling, and training checkpoints are training concerns and should not be added 
 inference transport contract.
 
 ## Basic usage
-```python
-from model_training.lmlm_training import TrainConfig, train
+    from model_training.lmlm_training import TrainConfig, train
 
-result = train(model, train_loader, optimizer, loss_fn,
-    config=TrainConfig(epochs=3, accumulation_steps=2, device="auto",
-                       precision="auto", max_grad_norm=1.0),
-    validation_loader=validation_loader)
-```
+    result = train(model, train_loader, optimizer, loss_fn,
+        config=TrainConfig(epochs=3, accumulation_steps=2, device="auto",
+                           precision="auto", max_grad_norm=1.0),
+        validation_loader=validation_loader)
 
 Batches may be `(inputs, targets)` or dictionaries containing `inputs` and `targets`.
 The model is called as `model(inputs)`; custom multi-argument model signatures should
@@ -84,7 +82,5 @@ before claiming the old top-level API is importable. Cython extensions are not b
 automatically by the Python package configuration.
 
 ## Test
-```bash
-python -m pip install -e ".[training,dev]"
-pytest
-```
+    python -m pip install -e ".[training,dev]"
+    pytest
