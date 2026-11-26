@@ -47,3 +47,23 @@ Parameter count does not establish capability; task-specific benchmarks are
 required. A raw softmax score is not automatically calibrated confidence. This
 module does not infer confidence or claim that a model knows its own limitations.
 External hardware availability and operating-system metrics are outside scope.
+
+
+## Trainer integration
+
+Pass an observer to the native training loop to record completed optimizer updates automatically:
+
+```python
+from model_training.self_awareness import SelfAwareness
+from model_training.lmlm_training.trainer import TrainConfig, train
+
+observer = SelfAwareness(model)
+result = train(
+    model, train_loader, optimizer, loss_fn,
+    config=TrainConfig(epochs=3, accumulation_steps=4),
+    self_awareness=observer,
+)
+report = observer.inspect()
+```
+
+The trainer starts each observed epoch and records one observation only when the optimizer actually updates parameters. For gradient accumulation, the recorded loss is the sample-weighted mean across the microbatches in that update, and the recorded batch size is their combined sample count. A skipped AMP optimizer update is not counted. Without `self_awareness`, the training loop does not import or instantiate the observer.
